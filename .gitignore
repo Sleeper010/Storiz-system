@@ -1,0 +1,9 @@
+.env
+node_modules
+dist
+generated
+uploads
+antigravity-claude-proxy
+.DS_Store
+*.log
+.vercel
