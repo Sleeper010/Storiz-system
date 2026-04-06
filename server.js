@@ -25,6 +25,9 @@ import destinationsRoutes from './routes/destinations.js';
 import photosRoutes from './routes/photos.js';
 import pdfRoutes from './routes/pdf.js';
 import generationRoutes from './routes/generation.js';
+import ordersRoutes from './routes/orders.js';
+import placementsRoutes from './routes/placements.js';
+import textsRoutes from './routes/texts.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -65,6 +68,9 @@ app.use('/api/destinations', destinationsRoutes);
 app.use('/api/photos', photosRoutes);
 app.use('/api/pdf', pdfRoutes);
 app.use('/api/generate', generationRoutes);
+app.use('/api/orders', ordersRoutes);
+app.use('/api/placements', placementsRoutes);
+app.use('/api/texts', textsRoutes);
 
 // Serve static files in production
 if (process.env.NODE_ENV === 'production') {

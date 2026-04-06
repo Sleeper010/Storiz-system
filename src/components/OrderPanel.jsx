@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../utils/api';
+import ManualOrderForm from './ManualOrderForm';
 
 export default function OrderPanel({ onOrderSelect }) {
   const [orders, setOrders] = useState([]);
@@ -7,6 +8,7 @@ export default function OrderPanel({ onOrderSelect }) {
   const [error, setError] = useState(null);
   const [search, setSearch] = useState('');
   const [selectedOrderId, setSelectedOrderId] = useState(null);
+  const [showManualForm, setShowManualForm] = useState(false);
 
   useEffect(() => {
     fetchOrders();
@@ -15,11 +17,29 @@ export default function OrderPanel({ onOrderSelect }) {
   const fetchOrders = async () => {
     setLoading(true);
     try {
-      const data = await api.shopify.getOrders();
-      setOrders(data || []);
+      // Fetch from both sources
+      const [shopifyData, manualData] = await Promise.all([
+        api.shopify.getOrders().catch(() => []),
+        api.orders.list().catch(() => [])
+      ]);
+      
+      const s = Array.isArray(shopifyData) ? shopifyData.map(o => ({ ...o, source: 'shopify' })) : [];
+      const m = Array.isArray(manualData) ? manualData.map(o => ({ 
+        ...o, 
+        source: 'manual',
+        orderNumber: o.order_number,
+        firstName: o.client_name.split(' ')[0],
+        lastName: o.client_name.split(' ').slice(1).join(' '),
+        lineItems: [] 
+      })) : [];
+
+      const merged = [...m, ...s].sort((a, b) => new Date(b.processedAt || b.created_at) - new Date(a.processedAt || a.created_at));
+      
+      setOrders(merged);
       setError(null);
     } catch (err) {
-      setError('Failed to load orders from Shopify.');
+      setError(err.message || 'Failed to load orders.');
+      setOrders([]); // reset to array on error
       console.error(err);
     } finally {
       setLoading(false);
@@ -65,15 +85,30 @@ export default function OrderPanel({ onOrderSelect }) {
   };
 
   return (
-    <div className="order-panel-container animate-fade-in">
+    <div className="order-panel-container animate-fade-in relative">
+      {showManualForm && (
+        <ManualOrderForm 
+          onClose={() => setShowManualForm(false)} 
+          onSuccess={(newOrder) => {
+            setShowManualForm(false);
+            fetchOrders();
+            handleSelect({ ...newOrder, orderNumber: newOrder.order_number, firstName: newOrder.client_name, lastName: '' });
+          }} 
+        />
+      )}
       <div className="section-header">
         <div>
-          <h2 className="section-title">Select Shopify Order</h2>
+          <h2 className="section-title">Select Order</h2>
           <p className="section-subtitle">Choose an order to start building a photo album</p>
         </div>
-        <button className="btn btn-secondary btn-sm" onClick={fetchOrders} disabled={loading}>
-          {loading ? 'Refreshing...' : 'Refresh List'}
-        </button>
+        <div className="flex gap-2">
+          <button className="btn btn-primary btn-sm" onClick={() => setShowManualForm(true)}>
+            + Manual Order
+          </button>
+          <button className="btn btn-secondary btn-sm" onClick={fetchOrders} disabled={loading}>
+            {loading ? 'Refreshing...' : 'Refresh List'}
+          </button>
+        </div>
       </div>
 
       <div className="search-bar-wrapper mb-4">
@@ -108,6 +143,8 @@ export default function OrderPanel({ onOrderSelect }) {
                 <div className="order-card-header">
                   <div className="flex items-center gap-2">
                     <span className="order-number">#{order.orderNumber}</span>
+                    {order.source === 'manual' && <span className="text-[10px] bg-purple-500/10 text-purple-400 px-1.5 py-0.5 rounded border border-purple-500/20 uppercase tracking-widest font-bold">Manual</span>}
+                    {order.source === 'shopify' && <span className="text-[10px] bg-green-500/10 text-green-400 px-1.5 py-0.5 rounded border border-green-500/20 uppercase tracking-widest font-bold">Shopify</span>}
                     {order.financialStatus === 'paid' && <span className="text-[10px] bg-green-500/10 text-green-400 px-1.5 py-0.5 rounded border border-green-500/20 uppercase tracking-widest font-bold">Paid</span>}
                     {order.financialStatus === 'pending' && <span className="text-[10px] bg-yellow-500/10 text-yellow-400 px-1.5 py-0.5 rounded border border-yellow-500/20 uppercase tracking-widest font-bold">Pending</span>}
                     {order.fulfillmentStatus === 'fulfilled' && <span className="text-[10px] bg-blue-500/10 text-blue-400 px-1.5 py-0.5 rounded border border-blue-500/20 uppercase tracking-widest font-bold">Shipped</span>}
@@ -123,13 +160,13 @@ export default function OrderPanel({ onOrderSelect }) {
                 <div className="order-card-body">
                   <h3 className="client-name">{order.firstName} {order.lastName}</h3>
                   <div className="order-meta">
-                    <span>📅 {new Date(order.processedAt).toLocaleDateString()}</span>
+                    <span>📅 {new Date(order.processedAt || order.created_at).toLocaleDateString()}</span>
                     <span>✉️ {order.email}</span>
                   </div>
                 </div>
                 <div className="order-card-footer flex flex-col items-start w-full">
                   <div className="line-items-summary w-full flex justify-between">
-                    <span>{order.lineItems.length} items • {order.currency} {order.totalPrice}</span>
+                    <span>{order.lineItems?.length || 0} items • {order.currency || 'MAD'} {order.totalPrice || 0}</span>
                   </div>
                   {order.hasGeneratedPdf && (
                     <div className="w-full mt-3 p-3 bg-black/20 rounded border border-white/5" onClick={e => e.stopPropagation()}>

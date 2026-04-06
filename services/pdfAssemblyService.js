@@ -4,6 +4,8 @@ import sharp from 'sharp';
 import fs from 'fs';
 import path from 'path';
 import { supabase } from './supabaseService.js';
+import { getPlacements } from './placementService.js';
+import { getAlbumTexts } from './textService.js';
 
 // Constants for A4 at 300 DPI (approx 72 DPI points for pdf-lib)
 // A4 = 595.28 x 841.89 points
@@ -22,14 +24,24 @@ export async function generateAlbum(config, photos) {
   for (const album of config.albums) {
     const albumId = `album_${album.id}_${Date.now()}`;
     
+    // Fetch DB data for placements and texts
+    let placements = [];
+    let texts = [];
+    try {
+      placements = await getPlacements(album.id);
+      texts = await getAlbumTexts(album.id);
+    } catch (e) {
+      console.log('Failed to load DB config for album; using fallback data', e);
+    }
+
     // 1. Generate Cover Render
-    const coverPdf = await generateCover(album);
+    const coverPdf = await generateCover(album, texts);
     const coverPath = `generated/${config.orderNumber}_${albumId}_cover.pdf`;
     await saveLocalPdf(coverPdf, coverPath);
 
     // 2. Generate Interior Render
-    const currentAlbumPhotos = photos[album.id] || [];
-    const interiorPdf = await generateInterior(album, currentAlbumPhotos, config);
+    // Pass DB placements and DB texts to the interior generator
+    const interiorPdf = await generateInterior(album, placements, texts, config);
     const interiorPath = `generated/${config.orderNumber}_${albumId}_interior.pdf`;
     await saveLocalPdf(interiorPdf, interiorPath);
 
@@ -46,7 +58,8 @@ export async function generateAlbum(config, photos) {
 /**
  * Generate the Hardcover Wrap PDF (Front + Spine + Back)
  */
-async function generateCover(album) {
+async function generateCover(album, texts) {
+  const getText = (target) => texts?.find(t => t.target === target)?.content || '';
   const pdfDoc = await PDFDocument.create();
   
   // Calculate Spine Width based on page count
@@ -100,7 +113,7 @@ async function generateCover(album) {
     // Position for spine is centered
     const centerX = BLEED + A4_WIDTH + (spineWidth / 2);
     
-    const destText = name.replace(/\s+\d+$/, '').toUpperCase();
+    const destText = getText('cover_spine_title') || name.replace(/\s+\d+$/, '').toUpperCase();
     const destSize = 36;
     const destWidth = londrinaFont.widthOfTextAtSize(destText, destSize);
     
@@ -113,7 +126,7 @@ async function generateCover(album) {
       rotate: { angle: -90, type: 'degrees' }
     });
 
-    const yearText = `${album.year}`;
+    const yearText = getText('cover_spine_year') || `${album.year}`;
     const yearSize = 14;
     const yearWidth = londrinaFont.widthOfTextAtSize(yearText, yearSize);
 
@@ -134,7 +147,8 @@ async function generateCover(album) {
 /**
  * Generate Interior PDF with Branded Content and Photos
  */
-async function generateInterior(album, photos, config) {
+async function generateInterior(album, placements, texts, config) {
+  const getText = (target) => texts?.find(t => t.target === target)?.content || '';
   const pdfDoc = await PDFDocument.create();
   const targetPageCount = album.pageCount || 60;
   
@@ -159,10 +173,10 @@ async function generateInterior(album, photos, config) {
         const londrinaFont = await pdfDoc.embedFont(fontBytes);
         const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
         
-        const destText = (album.destination.name || '').replace(/\s+\d+$/, '').toUpperCase();
-        const yearText = `[ ${album.year || new Date().getFullYear()} ]`;
-        const nameText = (album.customName || config.clientName || '').toUpperCase();
-        const siteText = 'storiz.ma';
+        const destText = getText('interior_dest') || (album.destination.name || '').replace(/\s+\d+$/, '').toUpperCase();
+        const yearText = getText('interior_year') || `[ ${album.year || new Date().getFullYear()} ]`;
+        const nameText = getText('interior_name') || (album.customName || config.clientName || '').toUpperCase();
+        const siteText = getText('interior_website') || 'storiz.ma';
         
         const destSize = 64;
         const yearSize = 28;
@@ -217,50 +231,22 @@ async function generateInterior(album, photos, config) {
     console.log('[PdfAssembly] Branding PDF start skip:', err.message);
   }
 
-  // 2. Add Photos — adaptive to actual photo count (never adds empty pages)
-  // P = number of pages we will actually create (capped to pageCount max)
+  // 2. Add Photos — using defined placements
   const maxPages = album.pageCount || 60;
-  const N = photos.length;
-  // How many pages do we need? If few photos, use fewer pages. Never exceed maxPages.
-  const P = N <= maxPages ? N : maxPages;
   
-  let capacities = [];
-  if (N <= P) {
-    // 1 photo per page
-    capacities = Array.from({ length: N }, () => 1);
-  } else {
-    // Multiple photos per page using random grid distribution
-    capacities = Array(P).fill(1);
-    let remaining = N - P;
-    let maxIter = P * 20;
-    while (remaining > 0 && maxIter-- > 0) {
-      const idx = Math.floor(Math.random() * P);
-      if (capacities[idx] < 4) {
-        const space = 4 - capacities[idx];
-        const add = Math.min(remaining, Math.floor(Math.random() * space) + 1);
-        capacities[idx] += add;
-        remaining -= add;
-      }
-    }
-  }
-
-  let photoChunks = [];
-  let photoIdx = 0;
-  for (let i = 0; i < P; i++) {
-    const count = capacities[i] || 0;
-    photoChunks.push(photos.slice(photoIdx, photoIdx + count));
-    photoIdx += count;
-  }
-
-  for (const chunk of photoChunks) {
+  for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+    const pagePlacements = placements
+      .filter(p => p.page_number === pageNum)
+      .sort((a,b) => a.slot_index - b.slot_index);
+      
     const page = pdfDoc.addPage([A4_WIDTH, A4_HEIGHT]);
-    if (chunk.length === 0) continue; 
+    const count = pagePlacements.length;
+    if (count === 0) continue;
 
-    const count = chunk.length;
     for (let i = 0; i < count; i++) {
-      const photo = chunk[i];
+      const placement = pagePlacements[i];
       try {
-        const resp = await fetch(photo.url);
+        const resp = await fetch(placement.photo_url);
         const rawBuffer = Buffer.from(await resp.arrayBuffer());
 
         let imgW = A4_WIDTH, imgH = A4_HEIGHT, x = 0, y = 0;
@@ -298,7 +284,7 @@ async function generateInterior(album, photos, config) {
         page.drawImage(imagePdfObj, { x, y, width: imgW, height: imgH });
         
       } catch (err) {
-        console.error(`Error embedding photo ${photo.id}:`, err.message);
+        console.error(`Error embedding photo ${placement.id}:`, err.message);
       }
     }
   }

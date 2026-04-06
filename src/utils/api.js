@@ -18,6 +18,14 @@ export async function apiRequest(path, options = {}) {
     }
 
     const data = await res.json();
+
+    // Throw a proper error for non-OK responses so callers don't
+    // accidentally treat error objects as valid data (e.g. calling .filter() on them)
+    if (!res.ok) {
+      const message = data?.error || data?.details || data?.message || `Server error ${res.status}`;
+      throw new Error(message);
+    }
+
     return data;
   } catch (err) {
     console.error('API Error:', err);
@@ -72,6 +80,40 @@ export const api = {
     create: (config, photos) => apiRequest('/api/generate', {
       method: 'POST',
       body: JSON.stringify({ config, photos })
+    })
+  },
+  orders: {
+    list: () => apiRequest('/api/orders'),
+    get: (id) => apiRequest(`/api/orders/${id}`),
+    create: (data) => apiRequest('/api/orders', {
+      method: 'POST',
+      body: JSON.stringify(data)
+    }),
+    sync: (data) => apiRequest('/api/orders/sync', {
+      method: 'POST',
+      body: JSON.stringify(data)
+    })
+  },
+  placements: {
+    get: (albumId) => apiRequest(`/api/placements/${albumId}`),
+    auto: (albumId, params) => apiRequest(`/api/placements/${albumId}/auto`, {
+      method: 'POST',
+      body: JSON.stringify(params)
+    }),
+    update: (albumId, placements) => apiRequest(`/api/placements/${albumId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ placements })
+    })
+  },
+  texts: {
+    get: (albumId) => apiRequest(`/api/texts/${albumId}`),
+    update: (albumId, texts) => apiRequest(`/api/texts/${albumId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ texts })
+    }),
+    generateDefaults: (albumId, params) => apiRequest(`/api/texts/${albumId}/defaults`, {
+      method: 'POST',
+      body: JSON.stringify(params)
     })
   }
 };
