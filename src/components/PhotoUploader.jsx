@@ -1,44 +1,79 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { supabase } from '../utils/supabaseClient';
+import { api } from '../utils/api';
 
-export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onComplete, onBack }) {
+export default function PhotoUploader({ orderId, orderDbId, albumId, albumIndex, pageCount = 60, onComplete, onBack }) {
   const [photos, setPhotos] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [draggedItem, setDraggedItem] = useState(null);
 
+  // Load photos from DB on mount
   useEffect(() => {
-    async function loadExistingPhotos() {
-      // Clear previous photos immediately on album switch
+    async function loadPhotos() {
       setPhotos([]);
+      if (!orderDbId || !albumId) {
+        // Fallback: load from storage directly (legacy path)
+        await loadFromStorage();
+        return;
+      }
+
+      try {
+        const dbPhotos = await api.photos.list(orderDbId, albumId);
+        if (dbPhotos && dbPhotos.length > 0) {
+          const mapped = dbPhotos.map((p, i) => ({
+            file: null,
+            id: p.id,
+            dbId: p.id,
+            name: p.file_name || `Photo ${i + 1}`,
+            preview: p.public_url,
+            url: p.public_url,
+            storagePath: p.storage_path,
+            status: p.status === 'committed' ? 'Committed' : 'Uploaded',
+            quality: 'Pushed to Cloud',
+            width: p.original_width || 0,
+            height: p.original_height || 0,
+            position: p.position,
+            expiresAt: p.expires_at,
+            dbStatus: p.status
+          }));
+          setPhotos(mapped);
+        }
+      } catch (err) {
+        console.warn('[PhotoUploader] DB load failed, falling back to storage:', err.message);
+        await loadFromStorage();
+      }
+    }
+
+    async function loadFromStorage() {
       try {
         const directory = `${orderId}/album_${albumIndex}`;
         const { data, error } = await supabase.storage.from('photos').list(`client-photos/${directory}`);
         
         if (data && data.length > 0) {
            const existing = data
-             // exclude placeholder/hidden files like .emptyFolderPlaceholder
-             .filter(file => file.name && !file.name.startsWith('.')) 
-             .map(file => {
-               const { data: urlData } = supabase.storage.from('photos').getPublicUrl(`client-photos/${directory}/${file.name}`);
-               return {
-                  file: null, // no physical file object needed since it's already uploaded
-                  id: file.id || file.name,
-                  name: file.name,
-                  preview: urlData.publicUrl,
-                  url: urlData.publicUrl,
-                  status: 'Uploaded',
-                  quality: 'Pushed to Cloud'
-               };
-           });
+              .filter(file => file.name && !file.name.startsWith('.')) 
+              .map(file => {
+                const { data: urlData } = supabase.storage.from('photos').getPublicUrl(`client-photos/${directory}/${file.name}`);
+                return {
+                   file: null,
+                   id: file.id || file.name,
+                   name: file.name,
+                   preview: urlData.publicUrl,
+                   url: urlData.publicUrl,
+                   status: 'Uploaded',
+                   quality: 'Pushed to Cloud'
+                };
+            });
            setPhotos(existing);
         }
       } catch (err) {
-        console.error('Failed to sync previously uploaded photos:', err);
+        console.error('Failed to load photos from storage:', err);
       }
     }
-    loadExistingPhotos();
-  }, [orderId, albumIndex]);
+
+    loadPhotos();
+  }, [orderId, orderDbId, albumId, albumIndex]);
 
   const handleDragStart = (e, index) => {
     setDraggedItem(index);
@@ -48,7 +83,7 @@ export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onC
     }
   };
 
-  const handleDropOnItem = (e, targetIndex) => {
+  const handleDropOnItem = async (e, targetIndex) => {
     e.preventDefault();
     if (draggedItem === null || draggedItem === targetIndex) return;
 
@@ -58,11 +93,22 @@ export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onC
     
     setPhotos(items);
     setDraggedItem(null);
+
+    // Persist new positions to DB if we have DB-backed photos
+    const updates = items
+      .filter(p => p.dbId)
+      .map((p, idx) => ({ id: p.dbId, position: idx }));
+
+    if (updates.length > 0) {
+      try {
+        await api.photos.reorder(updates);
+      } catch (err) {
+        console.warn('[PhotoUploader] Reorder save failed:', err.message);
+      }
+    }
   };
 
   const checkDPI = (width, height) => {
-    // A4 at 300 DPI is 2480x3508.
-    // We'll warn if width or height is less than 50% of target (150 DPI)
     const targetWidth = 2480;
     const targetHeight = 3508;
     const isLowRes = width < (targetWidth / 2) || height < (targetHeight / 2);
@@ -70,21 +116,16 @@ export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onC
   };
 
   const handleFiles = (files) => {
-    const newPhotos = Array.from(files).map(file => {
-      const img = new Image();
-      img.src = URL.createObjectURL(file);
-      
-      return {
-        file,
-        id: Math.random().toString(36).substr(2, 9),
-        name: file.name,
-        preview: URL.createObjectURL(file),
-        status: 'Pending',
-        quality: 'Checking...',
-        width: 0,
-        height: 0
-      };
-    });
+    const newPhotos = Array.from(files).map(file => ({
+      file,
+      id: Math.random().toString(36).substr(2, 9),
+      name: file.name,
+      preview: URL.createObjectURL(file),
+      status: 'Pending',
+      quality: 'Checking...',
+      width: 0,
+      height: 0
+    }));
 
     setPhotos(prev => [...prev, ...newPhotos]);
 
@@ -103,7 +144,18 @@ export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onC
     });
   };
 
-  const removePhoto = (id) => {
+  const removePhoto = async (id) => {
+    const photo = photos.find(p => p.id === id);
+    
+    // Delete from DB if it's a DB-backed photo
+    if (photo?.dbId) {
+      try {
+        await api.photos.delete(photo.dbId);
+      } catch (err) {
+        console.warn('[PhotoUploader] DB delete failed:', err.message);
+      }
+    }
+
     setPhotos(prev => prev.filter(p => p.id !== id));
   };
 
@@ -114,7 +166,6 @@ export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onC
         const canvas = document.createElement('canvas');
         let width = img.width;
         let height = img.height;
-        // Cap at A4 300DPI approx ~3508px longest edge to preserve extremely high print quality
         const maxDim = 3508;
         if (width > maxDim || height > maxDim) {
           if (width > height) {
@@ -128,17 +179,28 @@ export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onC
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext('2d');
-        // Fill white background in case of transparent PNG
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0, width, height);
         
         canvas.toBlob((blob) => {
           resolve(blob);
-        }, 'image/jpeg', 0.90); // 90% quality JPEG is excellent for print
+        }, 'image/jpeg', 0.90);
       };
       img.src = url;
     });
+  };
+
+  const getTimeRemaining = (expiresAt) => {
+    if (!expiresAt) return null;
+    const now = new Date();
+    const expires = new Date(expiresAt);
+    const diffMs = expires - now;
+    if (diffMs <= 0) return 'Expired';
+    const hours = Math.floor(diffMs / (1000 * 60 * 60));
+    const mins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+    if (hours > 0) return `${hours}h ${mins}m`;
+    return `${mins}m`;
   };
 
   const startUpload = async () => {
@@ -153,8 +215,9 @@ export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onC
       for (let i = 0; i < updatedPhotos.length; i++) {
         const photo = updatedPhotos[i];
 
-        if (photo.status === 'Uploaded' && photo.url) {
+        if ((photo.status === 'Uploaded' || photo.status === 'Committed') && photo.url) {
           uploadedAssets.push({
+            id: photo.dbId || photo.id,
             url: photo.url,
             name: photo.name,
             width: photo.width,
@@ -175,7 +238,6 @@ export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onC
         if (photo.file.size > 5 * 1024 * 1024 && photo.file.type.startsWith('image/')) {
           console.log(`Compressing ${photo.file.name} (${Math.round(photo.file.size / 1024 / 1024)}MB)`);
           const compressedBlob = await compressImage(photo.preview);
-          // Preserve fake File-like properties
           fileToUpload = compressedBlob;
           fileExt = 'jpg';
           mimeType = 'image/jpeg';
@@ -184,7 +246,7 @@ export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onC
         const fileName = `${orderId}/album_${albumIndex}/${photo.id}.${fileExt}`;
         const filePath = `client-photos/${fileName}`;
 
-        // Create a 60 second timeout for large files or network drops
+        // Create a 60 second timeout
         const timeoutPromise = new Promise((_, reject) => 
           setTimeout(() => reject(new Error('Upload timeout (60s). Network might be unstable.')), 60000)
         );
@@ -198,12 +260,34 @@ export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onC
         const { data: urlData } = supabase.storage.from('photos').getPublicUrl(filePath);
         const publicUrl = urlData.publicUrl;
 
+        // Register in DB if we have order/album IDs
+        let dbId = null;
+        if (orderDbId && albumId) {
+          try {
+            const dbPhoto = await api.photos.register({
+              orderId: orderDbId,
+              albumId: albumId,
+              storagePath: filePath,
+              publicUrl: publicUrl,
+              fileName: photo.name,
+              width: photo.width || 0,
+              height: photo.height || 0,
+              position: i
+            });
+            dbId = dbPhoto.id;
+          } catch (regErr) {
+            console.warn('[PhotoUploader] DB register failed:', regErr.message);
+          }
+        }
+
         photo.url = publicUrl;
+        photo.dbId = dbId;
         photo.status = 'Uploaded';
 
-        setPhotos(prev => prev.map(p => p.id === photo.id ? { ...p, status: 'Uploaded', url: publicUrl } : p));
+        setPhotos(prev => prev.map(p => p.id === photo.id ? { ...p, status: 'Uploaded', url: publicUrl, dbId } : p));
 
         uploadedAssets.push({
+          id: dbId || photo.id,
           url: publicUrl,
           name: photo.name,
           width: photo.width,
@@ -277,7 +361,7 @@ export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onC
       {photos.length > 0 && (
         <div className="photo-grid-container glass-card p-6 mb-8">
           <div className="flex justify-between items-center mb-6">
-            <h3 className="font-bold">{photos.length} Photos Pending</h3>
+            <h3 className="font-bold">{photos.length} Photos {photos.some(p => p.status === 'Pending') ? 'Pending' : 'Ready'}</h3>
             <button className="btn btn-danger btn-sm" onClick={() => setPhotos([])}>Clear All</button>
           </div>
           
@@ -295,6 +379,19 @@ export default function PhotoUploader({ orderId, albumIndex, pageCount = 60, onC
                   <div className="absolute top-1.5 left-1.5 z-10 w-6 h-6 rounded bg-accent/90 backdrop-blur-sm text-white flex items-center justify-center text-[11px] font-bold shadow-lg border border-white/20 select-none">
                     {index + 1}
                   </div>
+
+                  {/* Status badge */}
+                  {photo.dbStatus === 'pending' && photo.expiresAt && (
+                    <div className="absolute top-1.5 right-1.5 z-10 px-1.5 py-0.5 rounded bg-amber-500/80 backdrop-blur-sm text-white text-[9px] font-bold shadow-lg border border-amber-400/30 select-none">
+                      ⏳ {getTimeRemaining(photo.expiresAt)}
+                    </div>
+                  )}
+                  {photo.dbStatus === 'committed' && (
+                    <div className="absolute top-1.5 right-1.5 z-10 px-1.5 py-0.5 rounded bg-green-500/80 backdrop-blur-sm text-white text-[9px] font-bold shadow-lg border border-green-400/30 select-none">
+                      ✓ Saved
+                    </div>
+                  )}
+
                   <img src={photo.preview} alt="preview" className="w-full h-full object-cover drag-none pointer-events-none transition-transform group-hover:scale-105" />
                   <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center p-2 text-center backdrop-blur-md">
                     <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider mb-2 ${photo.quality === 'Low Resolution' ? 'bg-red-500/80 border border-red-400' : 'bg-green-500/80 border border-green-400'}`}>

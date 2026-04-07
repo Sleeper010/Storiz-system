@@ -6,6 +6,7 @@ import path from 'path';
 import { supabase } from './supabaseService.js';
 import { getPlacements } from './placementService.js';
 import { getAlbumTexts } from './textService.js';
+import { getBookPages } from './pageBuilderService.js';
 
 // Constants for A4 at 300 DPI (approx 72 DPI points for pdf-lib)
 // A4 = 595.28 x 841.89 points
@@ -24,24 +25,21 @@ export async function generateAlbum(config, photos) {
   for (const album of config.albums) {
     const albumId = `album_${album.id}_${Date.now()}`;
     
-    // Fetch DB data for placements and texts
-    let placements = [];
-    let texts = [];
+    // Fetch the unified Page map
+    let pages = [];
     try {
-      placements = await getPlacements(album.id);
-      texts = await getAlbumTexts(album.id);
+      pages = await getBookPages(album.id);
     } catch (e) {
-      console.log('Failed to load DB config for album; using fallback data', e);
+      console.log('Failed to load generic page context', e);
     }
 
     // 1. Generate Cover Render
-    const coverPdf = await generateCover(album, texts);
+    const coverPdf = await generateCover(album, pages);
     const coverPath = `generated/${config.orderNumber}_${albumId}_cover.pdf`;
     await saveLocalPdf(coverPdf, coverPath);
 
     // 2. Generate Interior Render
-    // Pass DB placements and DB texts to the interior generator
-    const interiorPdf = await generateInterior(album, placements, texts, config);
+    const interiorPdf = await generateInterior(album, pages, config);
     const interiorPath = `generated/${config.orderNumber}_${albumId}_interior.pdf`;
     await saveLocalPdf(interiorPdf, interiorPath);
 
@@ -57,9 +55,13 @@ export async function generateAlbum(config, photos) {
 
 /**
  * Generate the Hardcover Wrap PDF (Front + Spine + Back)
+ * - Spine uses same background as covers
+ * - Spine text uses destination font_color
+ * - No borders/outlines drawn
  */
-async function generateCover(album, texts) {
-  const getText = (target) => texts?.find(t => t.target === target)?.content || '';
+async function generateCover(album, pages) {
+  const coverPage = pages.find(p => p.type === 'cover');
+  const getText = (target) => coverPage?.texts.find(t => t.target === target)?.content || '';
   const pdfDoc = await PDFDocument.create();
   
   // Calculate Spine Width based on page count
@@ -68,20 +70,24 @@ async function generateCover(album, texts) {
   const totalHeight = A4_HEIGHT + (BLEED * 2);
 
   const page = pdfDoc.addPage([totalWidth, totalHeight]);
-  const { background_color, name, cover_url, back_cover_url } = album.destination;
-  const color = hexToRgb(background_color || '#000033');
+  const dest = album.destination || {};
+  const bgColorHex = dest.background_color || dest.bg_color || '#000033';
+  const fontColorHex = dest.font_color || '#ffffff';
+  const color = hexToRgb(bgColorHex);
+  const textColor = hexToRgb(fontColorHex);
 
-  // 1. Background Fill
+  // 1. Background Fill — one solid rectangle, no borders
   page.drawRectangle({
     x: 0, y: 0, width: totalWidth, height: totalHeight,
     color: rgb(color.r/255, color.g/255, color.b/255)
   });
 
-  // 2. Help embedding Front and Back covers
+  // 2. Embed Front and Back covers
   try {
-    if (cover_url) {
-      const frontBytes = await (await fetch(cover_url)).arrayBuffer();
-      const frontImg = await pdfDoc.embedPdf(frontBytes); // Assuming its a split PDF page
+    const coverUrl = dest.cover_url || dest.cover_front_url;
+    if (coverUrl) {
+      const frontBytes = await (await fetch(coverUrl)).arrayBuffer();
+      const frontImg = await pdfDoc.embedPdf(frontBytes);
       page.drawPage(frontImg[0], {
         x: BLEED + A4_WIDTH + spineWidth,
         y: BLEED,
@@ -90,8 +96,9 @@ async function generateCover(album, texts) {
       });
     }
     
-    if (back_cover_url) {
-      const backBytes = await (await fetch(back_cover_url)).arrayBuffer();
+    const backUrl = dest.back_cover_url || dest.cover_back_url;
+    if (backUrl) {
+      const backBytes = await (await fetch(backUrl)).arrayBuffer();
       const backImg = await pdfDoc.embedPdf(backBytes);
       page.drawPage(backImg[0], {
         x: BLEED,
@@ -104,7 +111,7 @@ async function generateCover(album, texts) {
     console.error('[PdfAssembly] Error embedding covers:', err.message);
   }
 
-  // 3. Draw Spine Text using Londrina Solid
+  // 3. Draw Spine Text using Londrina Solid — same font_color as cover title
   try {
     pdfDoc.registerFontkit(fontkit);
     const fontBytes = fs.readFileSync(path.resolve('services', 'londrinasolid.ttf'));
@@ -113,19 +120,31 @@ async function generateCover(album, texts) {
     // Position for spine is centered
     const centerX = BLEED + A4_WIDTH + (spineWidth / 2);
     
-    const destText = getText('cover_spine_title') || name.replace(/\s+\d+$/, '').toUpperCase();
-    const destSize = 36;
-    const destWidth = londrinaFont.widthOfTextAtSize(destText, destSize);
+    // Spine destination text
+    const destText = getText('cover_spine_title') || (dest.name || '').replace(/\s+\d+$/, '').toUpperCase();
+    
+    // Auto-scale font size to fit spine height with some padding
+    const maxTextHeight = totalHeight * 0.6; // Use 60% of spine height for destination text
+    let destSize = 36;
+    let destWidth = londrinaFont.widthOfTextAtSize(destText, destSize);
+    while (destWidth > maxTextHeight && destSize > 10) {
+      destSize -= 2;
+      destWidth = londrinaFont.widthOfTextAtSize(destText, destSize);
+    }
+    
+    // Use destination's font_color for spine text (not hardcoded white)
+    const spineTextColor = rgb(textColor.r/255, textColor.g/255, textColor.b/255);
     
     page.drawText(destText, {
       x: centerX - (destSize * 0.35),
       y: (totalHeight / 2) + (destWidth / 2),
       size: destSize,
       font: londrinaFont,
-      color: rgb(1, 1, 1),
+      color: spineTextColor,
       rotate: { angle: -90, type: 'degrees' }
     });
 
+    // Spine year text
     const yearText = getText('cover_spine_year') || `${album.year}`;
     const yearSize = 14;
     const yearWidth = londrinaFont.widthOfTextAtSize(yearText, yearSize);
@@ -135,7 +154,7 @@ async function generateCover(album, texts) {
       y: 60,
       size: yearSize,
       font: londrinaFont,
-      color: rgb(1, 1, 1)
+      color: spineTextColor
     });
   } catch (err) {
     console.error('Spine font error:', err);
@@ -147,8 +166,9 @@ async function generateCover(album, texts) {
 /**
  * Generate Interior PDF with Branded Content and Photos
  */
-async function generateInterior(album, placements, texts, config) {
-  const getText = (target) => texts?.find(t => t.target === target)?.content || '';
+async function generateInterior(album, pages, config) {
+  const titlePage = pages.find(p => p.type === 'title');
+  const getText = (target) => titlePage?.texts.find(t => t.target === target)?.content || '';
   const pdfDoc = await PDFDocument.create();
   const targetPageCount = album.pageCount || 60;
   
@@ -231,13 +251,11 @@ async function generateInterior(album, placements, texts, config) {
     console.log('[PdfAssembly] Branding PDF start skip:', err.message);
   }
 
-  // 2. Add Photos — using defined placements
-  const maxPages = album.pageCount || 60;
-  
-  for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
-    const pagePlacements = placements
-      .filter(p => p.page_number === pageNum)
-      .sort((a,b) => a.slot_index - b.slot_index);
+  // 2. Add Photos — using defined placements, respecting position/sort_order
+  for (const p of pages) {
+    if (p.type !== 'photo_grid') continue;
+    
+    const pagePlacements = p.slots.sort((a, b) => a.slotIndex - b.slotIndex);
       
     const page = pdfDoc.addPage([A4_WIDTH, A4_HEIGHT]);
     const count = pagePlacements.length;
@@ -246,7 +264,7 @@ async function generateInterior(album, placements, texts, config) {
     for (let i = 0; i < count; i++) {
       const placement = pagePlacements[i];
       try {
-        const resp = await fetch(placement.photo_url);
+        const resp = await fetch(placement.url);
         const rawBuffer = Buffer.from(await resp.arrayBuffer());
 
         let imgW = A4_WIDTH, imgH = A4_HEIGHT, x = 0, y = 0;
@@ -267,11 +285,10 @@ async function generateInterior(album, placements, texts, config) {
         } else {
             imgW = A4_WIDTH / 2; imgH = A4_HEIGHT / 2;
             x = (i % 2) === 0 ? 0 : (A4_WIDTH / 2);
-            // In PDF coordinate system, Y is measured from bottom-up!
             y = i < 2 ? (A4_HEIGHT / 2) : 0;
         }
 
-        // Multiply points ~ 4x for 300DPI pixel-perfect cropping buffer!
+        // Multiply points ~ 4x for 300DPI pixel-perfect cropping buffer
         const sharpW = Math.round(imgW * 4);
         const sharpH = Math.round(imgH * 4);
 
@@ -289,9 +306,7 @@ async function generateInterior(album, placements, texts, config) {
     }
   }
 
-  // 3. No empty page padding — PDF contains exactly as many pages as needed
-
-  // 4. Append Branding PDF Pages 3 & 4
+  // 3. Append Branding PDF Pages 3 & 4
   if (pdfDoc.__brandingPdf) {
     const brandingPdf = pdfDoc.__brandingPdf;
     try {
@@ -321,11 +336,10 @@ function hexToRgb(hex) {
     r: parseInt(result[1], 16),
     g: parseInt(result[2], 16),
     b: parseInt(result[3], 16)
-  } : { r: 0, g: 0, b: 51 };
+  } : { r: 255, g: 255, b: 255 };
 }
 
 async function saveLocalPdf(bytes, storagePath) {
-  // Ensure the generated directory exists
   const targetDir = path.resolve(path.dirname(storagePath));
   if (!fs.existsSync(targetDir)) {
     fs.mkdirSync(targetDir, { recursive: true });

@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import archiver from 'archiver';
 import { generateAlbum } from '../services/pdfAssemblyService.js';
+import { commitPhotos } from '../services/photoService.js';
 
 const router = express.Router();
 
@@ -16,6 +17,18 @@ router.post('/', async (req, res) => {
 
   try {
     const results = await generateAlbum(config, photos);
+    
+    // Commit photos for all albums after successful generation
+    if (config.albums) {
+      for (const album of config.albums) {
+        try {
+          if (album.id) await commitPhotos(album.id);
+        } catch (commitErr) {
+          console.warn('[GenerationRoute] Photo commit warning:', commitErr.message);
+        }
+      }
+    }
+    
     res.json({ success: true, results });
   } catch (err) {
     console.error('[GenerationRoute] Error:', err.message);

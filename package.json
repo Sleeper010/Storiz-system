@@ -12,6 +12,9 @@
     "dev:all": "node server.js & vite --host"
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
     "@pdf-lib/fontkit": "^1.1.1",
     "@supabase/supabase-js": "^2.49.0",
     "archiver": "^7.0.1",

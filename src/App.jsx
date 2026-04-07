@@ -5,9 +5,7 @@ import AlbumConfig from './components/AlbumConfig';
 import PhotoUploader from './components/PhotoUploader';
 import BrandingSettings from './components/BrandingSettings';
 import ArchivePanel from './components/ArchivePanel';
-import PlacementEditor from './components/PlacementEditor';
-import TextEditor from './components/TextEditor';
-import FlipbookPreview from './components/FlipbookPreview';
+import BookEditor from './components/BookEditor';
 import { api } from './utils/api';
 import './styles/index.css';
 
@@ -21,11 +19,9 @@ const NAV_ITEMS = [
 const WORKFLOW_STEPS = [
   { id: 1, label: 'Configure', icon: '⚙️' },
   { id: 2, label: 'Photos',    icon: '📸' },
-  { id: 3, label: 'Placements',icon: '🧩' },
-  { id: 4, label: 'Texts',     icon: '📝' },
-  { id: 5, label: 'Preview',   icon: '👀' },
-  { id: 6, label: 'Generate',  icon: '🏗️' },
-  { id: 7, label: 'Export',    icon: '📦' },
+  { id: 3, label: 'Book Editor', icon: '📖' },
+  { id: 4, label: 'Generate',  icon: '🏗️' },
+  { id: 5, label: 'Export',    icon: '📦' },
 ];
 
 // Pricing reference
@@ -76,6 +72,7 @@ export default function App() {
       // Sync order to DB to retrieve UUIDs for albums
       const dbData = await api.orders.sync({ order: selectedOrder, albums: config.albums });
       config.albums = config.albums.map((a, i) => ({ ...a, id: dbData.albums[i].id }));
+      config.orderDbId = dbData.id;
     } catch (err) {
       alert("Failed to sync order to DB: " + err.message);
       return;
@@ -86,39 +83,19 @@ export default function App() {
   };
 
   const handlePhotosComplete = (photos) => {
-    // This is called per album, but currently the UI just updates state and doesn't auto-advance
-    // The "Proceed" button handles advancement
+    // Handled by generic updates state
   };
   
-  const proceedToPlacements = () => {
+  const proceedToBookEditor = () => {
     setWorkflowStep(3);
     setCurrentAlbumIdx(0);
   };
 
-  const handlePlacementsComplete = (placements) => {
-    // Move to next album 
+  const handleBookEditorComplete = (pages) => {
     if (currentAlbumIdx < albumConfigs.albums.length - 1) {
       setCurrentAlbumIdx(currentAlbumIdx + 1);
     } else {
-      setWorkflowStep(4);
-      setCurrentAlbumIdx(0);
-    }
-  };
-
-  const handleTextsComplete = (texts) => {
-    if (currentAlbumIdx < albumConfigs.albums.length - 1) {
-      setCurrentAlbumIdx(currentAlbumIdx + 1);
-    } else {
-      setWorkflowStep(5); // Proceed to Preview
-      setCurrentAlbumIdx(0);
-    }
-  };
-
-  const handlePreviewComplete = () => {
-    if (currentAlbumIdx < albumConfigs.albums.length - 1) {
-      setCurrentAlbumIdx(currentAlbumIdx + 1);
-    } else {
-      setWorkflowStep(6); // Proceed to Generate
+      setWorkflowStep(4); // Proceed to Generate
       setCurrentAlbumIdx(0);
     }
   };
@@ -134,7 +111,7 @@ export default function App() {
       const data = await response.json();
       if (data.success) {
         setGeneratedResults(data.results);
-        setWorkflowStep(4);
+        setWorkflowStep(5);
       } else {
         alert('Generation failed: ' + data.error);
       }
@@ -312,6 +289,8 @@ export default function App() {
                         ) : (
                           <PhotoUploader
                             orderId={selectedOrder.orderNumber}
+                            orderDbId={albumConfigs.orderDbId}
+                            albumId={album.id}
                             albumIndex={idx}
                             pageCount={album.pageCount || 60}
                             onComplete={(photos) => {
@@ -328,12 +307,9 @@ export default function App() {
                     <button className="btn btn-secondary" onClick={() => setWorkflowStep(1)}>← Back to Config</button>
                     <button 
                       className="btn btn-primary btn-lg" 
-                      disabled={Object.keys(albumPhotos).length < albumConfigs.albums.length}
-                      onClick={proceedToPlacements}
+                      onClick={proceedToBookEditor}
                     >
-                      {Object.keys(albumPhotos).length < albumConfigs.albums.length 
-                        ? `Complete ${albumConfigs.albums.length - Object.keys(albumPhotos).length} more album(s)`
-                        : 'Proceed to Placements →'}
+                      Skip directly to Live Editor (UX Review) →
                     </button>
                   </div>
                 </div>
@@ -343,12 +319,12 @@ export default function App() {
                 <div className="mt-6">
                   {albumConfigs.albums.map((album, idx) => (
                     idx === currentAlbumIdx && (
-                      <PlacementEditor
+                      <BookEditor
                         key={album.id}
-                        orderId={selectedOrder.orderNumber}
+                        order={selectedOrder}
                         album={album}
                         photos={albumPhotos[idx] || []}
-                        onComplete={handlePlacementsComplete}
+                        onComplete={handleBookEditorComplete}
                         onBack={() => {
                           if (currentAlbumIdx > 0) setCurrentAlbumIdx(currentAlbumIdx - 1);
                           else setWorkflowStep(2);
@@ -366,55 +342,6 @@ export default function App() {
               )}
 
               {workflowStep === 4 && albumConfigs && (
-                <div className="mt-6">
-                  {albumConfigs.albums.map((album, idx) => (
-                    idx === currentAlbumIdx && (
-                      <TextEditor
-                        key={album.id}
-                        order={selectedOrder}
-                        album={album}
-                        onComplete={handleTextsComplete}
-                        onBack={() => {
-                          if (currentAlbumIdx > 0) setCurrentAlbumIdx(currentAlbumIdx - 1);
-                          else setWorkflowStep(3); // Go back to Placements
-                        }}
-                      />
-                    )
-                  ))}
-                  
-                  <div className="flex gap-2 justify-center mt-4 mb-8">
-                     {albumConfigs.albums.map((_, i) => (
-                       <div key={i} className={`w-2 h-2 rounded-full ${i === currentAlbumIdx ? 'bg-accent' : i < currentAlbumIdx ? 'bg-green-500' : 'bg-white/20'}`} />
-                     ))}
-                  </div>
-                </div>
-              )}
-
-              {workflowStep === 5 && albumConfigs && (
-                <div className="mt-6">
-                  {albumConfigs.albums.map((album, idx) => (
-                    idx === currentAlbumIdx && (
-                      <FlipbookPreview
-                        key={album.id}
-                        album={album}
-                        onComplete={handlePreviewComplete}
-                        onBack={() => {
-                          if (currentAlbumIdx > 0) setCurrentAlbumIdx(currentAlbumIdx - 1);
-                          else setWorkflowStep(4); // Go back to Texts
-                        }}
-                      />
-                    )
-                  ))}
-                  
-                  <div className="flex gap-2 justify-center mt-4 mb-8">
-                     {albumConfigs.albums.map((_, i) => (
-                       <div key={i} className={`w-2 h-2 rounded-full ${i === currentAlbumIdx ? 'bg-accent' : i < currentAlbumIdx ? 'bg-green-500' : 'bg-white/20'}`} />
-                     ))}
-                  </div>
-                </div>
-              )}
-
-              {workflowStep === 6 && albumConfigs && (
                 <GenerateScreen
                   albumConfigs={albumConfigs}
                   albumPhotos={albumPhotos}
@@ -424,7 +351,7 @@ export default function App() {
                 />
               )}
 
-              {workflowStep === 7 && generatedResults && (
+              {workflowStep === 5 && generatedResults && (
                 <ExportScreen
                   results={generatedResults}
                   albumConfigs={albumConfigs}

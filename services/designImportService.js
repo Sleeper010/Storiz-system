@@ -11,9 +11,19 @@ export async function splitAndUploadPdf(filePath, fileNamePrefix) {
   console.log(`[DesignImportService] Starting optimized split for: ${filePath}`);
   
   const existingPdfBytes = fs.readFileSync(filePath);
-  const pdfDoc = await PDFDocument.load(existingPdfBytes);
+  const pdfDoc = await PDFDocument.load(existingPdfBytes, { ignoreEncryption: true });
   const pageCount = pdfDoc.getPageCount();
   console.log(`[DesignImportService] PDF has ${pageCount} pages.`);
+
+  // If it's a 1-page PDF, avoid copying, just upload directly to preserve maximum fidelity.
+  if (pageCount === 1) {
+    const fileName = `${fileNamePrefix}_p1_${Date.now()}.pdf`;
+    const storagePath = `temp/${fileName}`;
+    const { error } = await supabase.storage.from('design-assets').upload(storagePath, existingPdfBytes, { contentType: 'application/pdf', upsert: true });
+    if (error) throw new Error('Supabase Storage Error: ' + error.message);
+    const { data: { publicUrl } } = supabase.storage.from('design-assets').getPublicUrl(storagePath);
+    return [{ pageIndex: 0, url: publicUrl, fileName }];
+  }
 
   const results = [];
   const BATCH_SIZE = 10; // Process 10 pages in parallel at a time
@@ -54,14 +64,24 @@ export async function splitAndUploadPdf(filePath, fileNamePrefix) {
           };
         } catch (err) {
           console.error(`[DesignImportService] Error on page ${pageIdx + 1}:`, err.message);
-          return null;
+          return { error: err.message };
         }
       })(j));
     }
 
     const batchResults = await Promise.all(batchPromises);
-    results.push(...batchResults.filter(r => r !== null));
+    for (const r of batchResults) {
+      if (r && r.error) {
+        throw new Error(`Failed to process page: ${r.error}`);
+      } else if (r) {
+        results.push(r);
+      }
+    }
     console.log(`[DesignImportService] Batch ${i / BATCH_SIZE + 1} complete. Total results: ${results.length}`);
+  }
+
+  if (results.length === 0) {
+    throw new Error('All pages failed to process. PDF might be corrupted or unsupported.');
   }
 
   console.log(`[DesignImportService] All ${pageCount} pages processed successfully.`);

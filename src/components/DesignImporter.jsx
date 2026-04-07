@@ -42,7 +42,7 @@ export default function DesignImporter({ onComplete, initialFile }) {
 
   // ── Step 1: Upload PDF to server ────────────────────────────────────────────
   const handleStartImport = async (fileToUpload) => {
-    const targetFile = fileToUpload || file;
+    const targetFile = (fileToUpload instanceof File ? fileToUpload : null) || file;
     if (!targetFile) return;
     setStep('processing');
     setProcessingMsg('Uploading and splitting PDF…');

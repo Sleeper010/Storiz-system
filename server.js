@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
 import { initializeDatabase } from './services/supabaseService.js';
+import { startCleanupCron } from './services/cleanupCron.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,6 +19,7 @@ if (process.env.NODE_ENV !== 'production') {
 
 // Initialize Supabase (Buckets, etc.)
 initializeDatabase();
+startCleanupCron();
 
 import authRoutes from './routes/auth.js';
 import shopifyRoutes from './routes/shopify.js';
@@ -28,6 +30,7 @@ import generationRoutes from './routes/generation.js';
 import ordersRoutes from './routes/orders.js';
 import placementsRoutes from './routes/placements.js';
 import textsRoutes from './routes/texts.js';
+import editorRoutes from './routes/editor.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -71,6 +74,7 @@ app.use('/api/generate', generationRoutes);
 app.use('/api/orders', ordersRoutes);
 app.use('/api/placements', placementsRoutes);
 app.use('/api/texts', textsRoutes);
+app.use('/api/editor', editorRoutes);
 
 // Serve static files in production
 if (process.env.NODE_ENV === 'production') {

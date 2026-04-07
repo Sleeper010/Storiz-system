@@ -41,6 +41,12 @@ export async function apiUpload(path, formData) {
   });
 
   const data = await res.json();
+  
+  if (!res.ok) {
+    const message = data?.error || data?.details || data?.message || `Server error ${res.status}`;
+    throw new Error(message);
+  }
+  
   return data;
 }
 
@@ -74,7 +80,17 @@ export const api = {
     delete: (id) => apiRequest(`/api/destinations/${id}`, { method: 'DELETE' })
   },
   photos: {
-    upload: (formData) => apiUpload('/api/photos/upload', formData)
+    list: (orderId, albumId) => apiRequest(`/api/photos/${orderId}/${albumId}`),
+    register: (data) => apiRequest('/api/photos/register', { 
+      method: 'POST', 
+      body: JSON.stringify(data) 
+    }),
+    reorder: (updates) => apiRequest('/api/photos/reorder', { 
+      method: 'PUT', 
+      body: JSON.stringify({ updates }) 
+    }),
+    delete: (id) => apiRequest(`/api/photos/${id}`, { method: 'DELETE' }),
+    commit: (albumId) => apiRequest(`/api/photos/commit/${albumId}`, { method: 'POST' }),
   },
   generate: {
     create: (config, photos) => apiRequest('/api/generate', {
